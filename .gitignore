@@ -1,0 +1,26 @@
+# Build output
+/build/
+/**/build/
+/bootloader/build/
+
+# VS Code
+.vscode/
+
+# Managed components
+/managed_components/
+
+# Common generated artifacts
+*.o
+*.d
+*.elf
+*.bin
+*.map
+*.log
+*.swp
+*.tmp
+*.bak
+sdkconfig
+sdkconfig.old
+compile_commands.json
+CMakeFiles/
+cmake-build-*/

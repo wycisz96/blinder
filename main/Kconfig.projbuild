@@ -1,0 +1,19 @@
+menu "Roleta Zigbee Configuration"
+
+    config ZB_EXAMPLE_PRIMARY_CHANNEL
+        int "Zigbee Primary Channel"
+        range 11 26
+        default 13
+        help
+            Podstawowy kanał Zigbee, na którym urządzenie tworzy/dołącza
+            do sieci.
+
+    config ZB_EXAMPLE_SECONDARY_CHANNEL_MASK
+        hex "Zigbee Secondary Channel Mask"
+        default 0x07FFF800
+        help
+            Zapasowa maska kanałów Zigbee (fallback), jeśli kanał
+            podstawowy jest niedostępny. Domyślnie wszystkie kanały
+            2.4GHz (11-26).
+
+endmenu

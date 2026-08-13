@@ -159,7 +159,7 @@ esp_err_t motor_driver_move(motor_dir_t dir, uint32_t max_steps, bool stop_at_li
         /* Co jakis czas oddaj CPU, zeby nie zaglodzic innych taskow
          * (watchdog, stos Zigbee) przy dlugich ruchach. */
         if ((done & 0x3F) == 0) {
-            vTaskDelay(0);
+            vTaskDelay(1);
         }
     }
 

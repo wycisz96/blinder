@@ -27,8 +27,8 @@
 
 static const char *TAG = "ROLETA_END_DEVICE";
 
-#define DEEP_SLEEP_TIME_SLEEP_SEC  10 /* jak dlugo spimy miedzy odpytaniami */
-#define DEEP_SLEEP_TIME_WAKEUP_SEC 8  /* fallback: ile czekamy na komende zanim usniemy, gdy nic nie przyjdzie */
+#define DEEP_SLEEP_TIME_SLEEP_SEC  30 /* jak dlugo spimy miedzy odpytaniami */
+#define DEEP_SLEEP_TIME_WAKEUP_SEC 1  /* fallback: ile czekamy na komende zanim usniemy, gdy nic nie przyjdzie */
 
 /* Pozycja rolety (w krokach silnika) - przetrwa deep sleep (pamiec RTC).
  * 0 = calkowicie zwinieta (gorna krancowka, 0% w ZCL). Nie przetrwa pelnej
@@ -82,7 +82,7 @@ static void enter_deep_sleep_now(void)
      * cala reszta logiki (timery, kolejkowanie, flagi) dziala normalnie,
      * po prostu nie usypiamy faktycznie urzadzenia. Odkomentuj przed
      * wersja produkcyjna. */
-    //esp_deep_sleep_start();
+    esp_deep_sleep_start();
     ESP_LOGW(TAG, "[TEST MODE] esp_deep_sleep_start() pominiete - urzadzenie NIE usnie");
 }
 
@@ -395,6 +395,12 @@ static esp_err_t esp_zigbee_create_roleta_device(void)
 
     /* Typ pokrycia: rolershada (roleta rolowana) */
     wc_cfg.window_covering_cfg.window_covering_type = EZB_ZCL_WINDOW_COVERING_WINDOW_COVERING_TYPE_ROLLERSHADE;
+    /* LIFT_CLOSED_LOOP mowi bibliotece ze lift jest sterowany przez firmware -
+     * bez tego bitu biblioteka moze ACKowac upOpen/downClose sama, bez
+     * wołania callbacka EZB_ZCL_CORE_WINDOW_COVERING_MOVEMENT_CB_ID. */
+    wc_cfg.window_covering_cfg.config_status =
+        EZB_ZCL_WINDOW_COVERING_CONFIG_STATUS_OPERATIONAL |
+        EZB_ZCL_WINDOW_COVERING_CONFIG_STATUS_LIFT_CLOSED_LOOP;
 
     ezb_af_ep_desc_t ep_desc = ezb_zha_create_window_covering(ESP_ZIGBEE_ROLETA_EP_ID, &wc_cfg);
 

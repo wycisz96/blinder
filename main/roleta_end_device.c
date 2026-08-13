@@ -171,7 +171,7 @@ static void home_to_top_limit(void)
 {
     ESP_LOGI(TAG, "Homing to top limit switch...");
     uint32_t steps_done = 0;
-    motor_driver_move(MOTOR_DIR_UP, ROLETA_HOMING_MAX_STEPS, true, &s_stop_requested, &steps_done);
+    //motor_driver_move(MOTOR_DIR_UP, ROLETA_HOMING_MAX_STEPS, true, &s_stop_requested, &steps_done);
     s_position_steps = 0;
     s_position_known = true;
     ESP_LOGI(TAG, "Homing done after %lu steps", (unsigned long)steps_done);
@@ -403,6 +403,15 @@ static esp_err_t esp_zigbee_create_roleta_device(void)
         EZB_ZCL_WINDOW_COVERING_CONFIG_STATUS_LIFT_CLOSED_LOOP;
 
     ezb_af_ep_desc_t ep_desc = ezb_zha_create_window_covering(ESP_ZIGBEE_ROLETA_EP_ID, &wc_cfg);
+
+    /* Dodaj atrybut CurrentPositionLiftPercentage (0x0008) - nie jest zawarty
+     * w domyslnej konfiguracji klastra, a bez niego update_lift_percentage_attr()
+     * nie moze go zapisac (attr not found). Wartosc poczatkowa 0xFF = nieznana. */
+    ezb_zcl_cluster_desc_t wc_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_WINDOW_COVERING, EZB_ZCL_CLUSTER_SERVER);
+    uint8_t lift_pct_init = 0xFF;
+    ezb_zcl_window_covering_cluster_desc_add_attr(wc_desc,
+                                                  EZB_ZCL_ATTR_WINDOW_COVERING_CURRENT_POSITION_LIFT_PERCENTAGE_ID,
+                                                  &lift_pct_init);
 
     ezb_zcl_cluster_desc_t basic_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_BASIC, EZB_ZCL_CLUSTER_SERVER);
     ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);

@@ -82,7 +82,7 @@ static void enter_deep_sleep_now(void)
      * cala reszta logiki (timery, kolejkowanie, flagi) dziala normalnie,
      * po prostu nie usypiamy faktycznie urzadzenia. Odkomentuj przed
      * wersja produkcyjna. */
-    esp_deep_sleep_start();
+    //esp_deep_sleep_start();
     ESP_LOGW(TAG, "[TEST MODE] esp_deep_sleep_start() pominiete - urzadzenie NIE usnie");
 }
 
@@ -206,19 +206,21 @@ static void execute_motor_cmd(const motor_cmd_t *cmd)
     if (target_steps != s_position_steps && !s_stop_requested) {
         uint32_t steps_done = 0;
         if (target_steps < s_position_steps) {
+            /* Ruch w gore (OPEN) - krzancowka jest na dole, wiec nie
+             * zatrzymujemy sie na niej w tym kierunku. */
             uint32_t diff = s_position_steps - target_steps;
-            /* Ruch w gore - pozwalamy zatrzymac sie wczesniej na
-             * krancowce, gdyby kalibracja "uciekla" w czasie. */
-            motor_driver_move(MOTOR_DIR_UP, diff, true, &s_stop_requested, &steps_done);
-            if (motor_driver_limit_switch_triggered()) {
-                s_position_steps = 0;
-            } else {
-                s_position_steps -= steps_done;
-            }
+            motor_driver_move(MOTOR_DIR_UP, diff, false, &s_stop_requested, &steps_done);
+            s_position_steps -= steps_done;
         } else {
+            /* Ruch w dol (CLOSE) - krzancowka wyznacza koniec ruchu,
+             * zatrzymujemy sie na niej. */
             uint32_t diff = target_steps - s_position_steps;
-            motor_driver_move(MOTOR_DIR_DOWN, diff, false, &s_stop_requested, &steps_done);
-            s_position_steps += steps_done;
+            motor_driver_move(MOTOR_DIR_DOWN, diff, true, &s_stop_requested, &steps_done);
+            if (motor_driver_limit_switch_triggered()) {
+                s_position_steps = ROLETA_TOTAL_STEPS;
+            } else {
+                s_position_steps += steps_done;
+            }
         }
     }
 

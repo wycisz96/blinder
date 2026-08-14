@@ -40,7 +40,7 @@
 /* Liczba kroków silnika odpowiadająca pełnemu rozwinięciu rolety
  * (0% = zwinięta/góra/krańcówka, 100% = rozwinięta/dół).
  * DO SKALIBROWANIA na konkretnej instalacji - patrz README/komentarz w .c */
-#define ROLETA_TOTAL_STEPS         10*4096u
+#define ROLETA_TOTAL_STEPS         4096u
 
 /* Zapas bezpieczeństwa przy najeżdżaniu na krańcówkę (żeby nie kręcić
  * silnika w nieskończoność, gdyby krańcówka nie zadziałała) */

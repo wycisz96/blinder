@@ -48,14 +48,12 @@ static volatile bool s_stop_requested = false;
 static volatile bool s_motion_active  = false;
 
 typedef enum {
-    MOTOR_CMD_UP_OPEN,
-    MOTOR_CMD_DOWN_CLOSE,
     MOTOR_CMD_GOTO_PERCENT,
 } motor_cmd_type_t;
 
 typedef struct {
     motor_cmd_type_t type;
-    uint8_t          percent; /* uzywane tylko dla MOTOR_CMD_GOTO_PERCENT, 0-100 */
+    uint8_t          percent; /* 0-100 */
 } motor_cmd_t;
 
 static QueueHandle_t s_motor_cmd_queue;
@@ -69,20 +67,17 @@ static void esp_zigbee_alarm_bdb_commissioning(void *arg);
 
 static void enter_deep_sleep_now(void)
 {
-    /* Jesli ruch trwa, nie usypiamy - watchdog w motor_task i tak nie
-     * pozwoli na to (patrz enter_deep_sleep_if_idle), to dodatkowe
-     * zabezpieczenie na wszelki wypadek. */
     if (s_motion_active) {
         return;
     }
-    esp_timer_stop(s_oneshot_timer); /* ignorujemy blad jesli juz nie dziala */
+    esp_timer_stop(s_oneshot_timer);
     ESP_LOGI(TAG, "Enter deep sleep for %d seconds", DEEP_SLEEP_TIME_SLEEP_SEC);
     gettimeofday(&s_sleep_time, NULL);
     /* TYMCZASOWO WYLACZONE na czas testow logiki silnika/Zigbee -
      * cala reszta logiki (timery, kolejkowanie, flagi) dziala normalnie,
      * po prostu nie usypiamy faktycznie urzadzenia. Odkomentuj przed
      * wersja produkcyjna. */
-    esp_deep_sleep_start();
+    //esp_deep_sleep_start();
     ESP_LOGW(TAG, "[TEST MODE] esp_deep_sleep_start() pominiete - urzadzenie NIE usnie");
 }
 
@@ -90,7 +85,6 @@ static void esp_deep_sleep_start_sleep(void *arg)
 {
     (void)arg;
     if (s_motion_active) {
-        /* Ruch w toku - nie usypiaj teraz, sprobuj ponownie za chwile. */
         ESP_LOGI(TAG, "Motion active, deferring deep sleep");
         esp_timer_start_once(s_oneshot_timer, 1 * 1000000);
         return;
@@ -150,23 +144,29 @@ static uint8_t steps_to_percent(uint32_t steps)
 
 static void update_lift_percentage_attr(uint8_t percent)
 {
-    ezb_zcl_attr_desc_t attr = ezb_zcl_get_attr_desc(ESP_ZIGBEE_ROLETA_EP_ID, EZB_ZCL_CLUSTER_ID_WINDOW_COVERING,
-                                                      EZB_ZCL_CLUSTER_SERVER,
-                                                      EZB_ZCL_ATTR_WINDOW_COVERING_CURRENT_POSITION_LIFT_PERCENTAGE_ID,
-                                                      EZB_ZCL_STD_MANUF_CODE);
-    if (attr == EZB_INVALID_ZCL_ATTR_DESC) {
-        ESP_LOGW(TAG, "CurrentPositionLiftPercentage attr not found");
-        return;
-    }
     esp_zigbee_lock_acquire(portMAX_DELAY);
-    ezb_zcl_attr_desc_set_value(attr, &percent);
+
+    /* Zaktualizuj wartość atrybutu w stosie Zigbee — to jest jedyna funkcja
+     * która faktycznie zapisuje wartość widoczną dla read/report. */
+    ezb_zcl_status_t status = ezb_zcl_set_attr_value(
+        ESP_ZIGBEE_ROLETA_EP_ID,
+        EZB_ZCL_CLUSTER_ID_WINDOW_COVERING,
+        EZB_ZCL_CLUSTER_SERVER,
+        EZB_ZCL_ATTR_WINDOW_COVERING_CURRENT_POSITION_LIFT_PERCENTAGE_ID,
+        EZB_ZCL_STD_MANUF_CODE,
+        &percent,
+        false);
+
     esp_zigbee_lock_release();
-    ESP_LOGI(TAG, "Position updated: %u%% (%lu/%lu kroków)", percent, (unsigned long)s_position_steps,
-             (unsigned long)ROLETA_TOTAL_STEPS);
+
+    if (status != EZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "ezb_zcl_set_attr_value failed: 0x%x", status);
+    } else {
+        ESP_LOGI(TAG, "Position updated: %u%% (%lu/%lu kroków)", percent,
+                 (unsigned long)s_position_steps, (unsigned long)ROLETA_TOTAL_STEPS);
+    }
 }
 
-/* Najedz na gorna krancowke i wyzeruj pozycje. Wolane automatycznie przy
- * pierwszym ruchu po utracie kalibracji (np. pierwsze uruchomienie). */
 static void home_to_top_limit(void)
 {
     ESP_LOGI(TAG, "Homing to top limit switch...");
@@ -188,26 +188,12 @@ static void execute_motor_cmd(const motor_cmd_t *cmd)
         home_to_top_limit();
     }
 
-    uint32_t target_steps;
-    switch (cmd->type) {
-    case MOTOR_CMD_UP_OPEN:
-        target_steps = 0;
-        break;
-    case MOTOR_CMD_DOWN_CLOSE:
-        target_steps = ROLETA_TOTAL_STEPS;
-        break;
-    case MOTOR_CMD_GOTO_PERCENT:
-    default: {
-        uint8_t pct = cmd->percent > 100 ? 100 : cmd->percent;
-        target_steps = ((uint32_t)pct * ROLETA_TOTAL_STEPS) / 100u;
-    } break;
-    }
+    uint8_t pct = cmd->percent > 100 ? 100 : cmd->percent;
+    uint32_t target_steps = ((uint32_t)pct * ROLETA_TOTAL_STEPS) / 100u;
 
     if (target_steps != s_position_steps && !s_stop_requested) {
         uint32_t steps_done = 0;
         if (target_steps < s_position_steps) {
-            /* Ruch w gore (OPEN) - krancowka gorna wyznacza koniec ruchu,
-             * zatrzymujemy sie na niej i zerujemy pozycje. */
             uint32_t diff = s_position_steps - target_steps;
             motor_driver_move(MOTOR_DIR_UP, diff, true, &s_stop_requested, &steps_done);
             if (motor_driver_limit_switch_triggered()) {
@@ -216,8 +202,6 @@ static void execute_motor_cmd(const motor_cmd_t *cmd)
                 s_position_steps -= steps_done;
             }
         } else {
-            /* Ruch w dol (CLOSE) - koniec ruchu wyznacza ROLETA_TOTAL_STEPS;
-             * krancowka jest na gorze, wiec przy tym kierunku nigdy nie strzeli. */
             uint32_t diff = target_steps - s_position_steps;
             motor_driver_move(MOTOR_DIR_DOWN, diff, false, &s_stop_requested, &steps_done);
             s_position_steps += steps_done;
@@ -239,9 +223,6 @@ static void motor_task(void *arg)
         if (xQueueReceive(s_motor_cmd_queue, &cmd, portMAX_DELAY) == pdTRUE) {
             execute_motor_cmd(&cmd);
 
-            /* Jesli w kolejce nic wiecej nie czeka, oszczedzajmy baterie i
-             * usnijmy od razu, zamiast czekac na uplyniecie fallbackowego
-             * okna DEEP_SLEEP_TIME_WAKEUP_SEC. */
             if (uxQueueMessagesWaiting(s_motor_cmd_queue) == 0) {
                 enter_deep_sleep_now();
             }
@@ -282,7 +263,7 @@ static void esp_zigbee_alarm_bdb_commissioning(void *arg)
 static void schedule_commissioning_retry(ezb_bdb_comm_mode_mask_t mode)
 {
     s_retry_mode = mode;
-    esp_timer_stop(s_retry_timer); /* ignorujemy blad jesli juz nie dziala */
+    esp_timer_stop(s_retry_timer);
     esp_timer_start_once(s_retry_timer, 1 * 1000000);
 }
 
@@ -349,15 +330,17 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
 
         switch (cmd_id) {
         case EZB_ZCL_CMD_WINDOW_COVERING_UP_OPEN_ID:
-            cmd.type = MOTOR_CMD_UP_OPEN;
-            queued   = true;
+            cmd.type    = MOTOR_CMD_GOTO_PERCENT;
+            cmd.percent = 0; // Otwarta w 0% (standard ZCL)
+            queued      = true;
             break;
         case EZB_ZCL_CMD_WINDOW_COVERING_DOWN_CLOSE_ID:
-            cmd.type = MOTOR_CMD_DOWN_CLOSE;
-            queued   = true;
+            cmd.type    = MOTOR_CMD_GOTO_PERCENT;
+            cmd.percent = 100; // Zamknięta w 100% (standard ZCL)
+            queued      = true;
             break;
         case EZB_ZCL_CMD_WINDOW_COVERING_STOP_ID:
-            s_stop_requested = true; /* natychmiastowe przerwanie, bez kolejki */
+            s_stop_requested = true;
             msg->out.result  = EZB_ZCL_STATUS_SUCCESS;
             break;
         case EZB_ZCL_CMD_WINDOW_COVERING_GO_TO_LIFT_PERCENTAGE_ID:
@@ -395,20 +378,13 @@ static esp_err_t esp_zigbee_create_roleta_device(void)
     ezb_af_device_desc_t              dev_desc = ezb_af_create_device_desc();
     ezb_zha_window_covering_config_t  wc_cfg    = EZB_ZHA_WINDOW_COVERING_CONFIG();
 
-    /* Typ pokrycia: rolershada (roleta rolowana) */
     wc_cfg.window_covering_cfg.window_covering_type = EZB_ZCL_WINDOW_COVERING_WINDOW_COVERING_TYPE_ROLLERSHADE;
-    /* LIFT_CLOSED_LOOP mowi bibliotece ze lift jest sterowany przez firmware -
-     * bez tego bitu biblioteka moze ACKowac upOpen/downClose sama, bez
-     * wołania callbacka EZB_ZCL_CORE_WINDOW_COVERING_MOVEMENT_CB_ID. */
     wc_cfg.window_covering_cfg.config_status =
         EZB_ZCL_WINDOW_COVERING_CONFIG_STATUS_OPERATIONAL |
         EZB_ZCL_WINDOW_COVERING_CONFIG_STATUS_LIFT_CLOSED_LOOP;
 
     ezb_af_ep_desc_t ep_desc = ezb_zha_create_window_covering(ESP_ZIGBEE_ROLETA_EP_ID, &wc_cfg);
 
-    /* Dodaj atrybut CurrentPositionLiftPercentage (0x0008) - nie jest zawarty
-     * w domyslnej konfiguracji klastra, a bez niego update_lift_percentage_attr()
-     * nie moze go zapisac (attr not found). Wartosc poczatkowa 0xFF = nieznana. */
     ezb_zcl_cluster_desc_t wc_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_WINDOW_COVERING, EZB_ZCL_CLUSTER_SERVER);
     uint8_t lift_pct_init = 0xFF;
     ezb_zcl_window_covering_cluster_desc_add_attr(wc_desc,
@@ -433,7 +409,7 @@ esp_err_t esp_zigbee_setup_commissioning(void)
     ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ESP_ZIGBEE_PRIMARY_CHANNEL_MASK));
     ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(ESP_ZIGBEE_SECONDARY_CHANNEL_MASK));
     ESP_ERROR_CHECK(ezb_app_signal_add_handler(esp_zigbee_app_signal_handler));
-    ezb_nwk_set_rx_on_when_idle(false); /* sleepy end device */
+    ezb_nwk_set_rx_on_when_idle(false);
 
     return ESP_OK;
 }
@@ -455,9 +431,6 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
 void app_main(void)
 {
-    /* WAZNE: zwolnij gpio_hold jak najwczesniej, przed jakakolwiek inna
-     * konfiguracja pinow silnika - inaczej stan sprzed deep sleep
-     * zablokuje ich przekonfigurowanie. */
     motor_driver_release_hold();
 
     ESP_ERROR_CHECK(nvs_flash_init());

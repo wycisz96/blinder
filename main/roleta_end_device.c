@@ -77,7 +77,7 @@ static void enter_deep_sleep_now(void)
      * cala reszta logiki (timery, kolejkowanie, flagi) dziala normalnie,
      * po prostu nie usypiamy faktycznie urzadzenia. Odkomentuj przed
      * wersja produkcyjna. */
-    //esp_deep_sleep_start();
+    esp_deep_sleep_start();
     ESP_LOGW(TAG, "[TEST MODE] esp_deep_sleep_start() pominiete - urzadzenie NIE usnie");
 }
 
@@ -223,8 +223,14 @@ static void motor_task(void *arg)
         if (xQueueReceive(s_motor_cmd_queue, &cmd, portMAX_DELAY) == pdTRUE) {
             execute_motor_cmd(&cmd);
 
+            /* Jeśli nie ma więcej komend w kolejce, nie usypiaj od razu.
+             * Daj radiu Zigbee 2 sekundy na wysłanie raportu o nowej pozycji. */
             if (uxQueueMessagesWaiting(s_motor_cmd_queue) == 0) {
-                enter_deep_sleep_now();
+                ESP_LOGI(TAG, "Ruch zakonczony. Oczekiwanie 2s na wyslanie raportow Zigbee...");
+                
+                /* Zatrzymujemy timer, jesli chodzil, i ustawiamy na 2 sekundy */
+                esp_timer_stop(s_oneshot_timer);
+                esp_timer_start_once(s_oneshot_timer, 2 * 1000000);
             }
         }
     }

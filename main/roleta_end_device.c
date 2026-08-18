@@ -9,6 +9,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_timer.h"
 #include "esp_sleep.h"
@@ -30,13 +31,20 @@ static const char *TAG = "ROLETA_END_DEVICE";
 #define DEEP_SLEEP_TIME_SLEEP_SEC  30 /* jak dlugo spimy miedzy odpytaniami */
 #define DEEP_SLEEP_TIME_WAKEUP_SEC 1  /* fallback: ile czekamy na komende zanim usniemy, gdy nic nie przyjdzie */
 
-/* Pozycja rolety (w krokach silnika) - przetrwa deep sleep (pamiec RTC).
- * 0 = calkowicie zwinieta (gorna krancowka, 0% w ZCL). Nie przetrwa pelnej
- * utraty zasilania (np. odlaczenie baterii) - w takim wypadku
- * s_position_known=false wymusi ponowne "zerowanie" na krancowce przy
- * pierwszym ruchu. */
-static RTC_DATA_ATTR uint32_t s_position_steps  = 0;
-static RTC_DATA_ATTR bool     s_position_known  = false;
+/* Nazwy przestrzeni/kluczy NVS uzywane do trwalego zapisu pozycji rolety. */
+#define ROLETA_NVS_NAMESPACE   "roleta"
+#define ROLETA_NVS_KEY_STEPS   "pos_steps"
+#define ROLETA_NVS_KEY_KNOWN   "pos_known"
+
+/* Pozycja rolety (w krokach silnika). Trzymana w RAM, ale zapisywana
+ * trwale do NVS (flash) po kazdym zakonczonym ruchu - dzieki temu
+ * przetrwa nie tylko deep sleep, ale rowniez pelny reset/brownout/
+ * odlaczenie baterii. Wczytywana raz przy starcie (app_main). Jesli
+ * w NVS nie ma jeszcze zapisanej wartosci (pierwsze uruchomienie),
+ * s_position_known=false wymusi ponowne "zerowanie" na krancowce
+ * przy pierwszym ruchu. */
+static uint32_t s_position_steps  = 0;
+static bool     s_position_known  = false;
 
 static RTC_DATA_ATTR struct timeval s_sleep_time;
 static esp_timer_handle_t           s_oneshot_timer;
@@ -60,6 +68,64 @@ static QueueHandle_t s_motor_cmd_queue;
 
 /* forward declarations */
 static void esp_zigbee_alarm_bdb_commissioning(void *arg);
+
+/* -------------------------------------------------------------------- */
+/*  Trwaly zapis pozycji (NVS)                                          */
+/* -------------------------------------------------------------------- */
+
+static esp_err_t position_load_from_nvs(uint32_t *steps, bool *known)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ROLETA_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        /* np. ESP_ERR_NVS_NOT_FOUND przy pierwszym uruchomieniu -
+         * namespace jeszcze nie istnieje */
+        *steps = 0;
+        *known = false;
+        return err;
+    }
+
+    uint32_t saved_steps = 0;
+    uint8_t  saved_known = 0;
+    esp_err_t err_s = nvs_get_u32(handle, ROLETA_NVS_KEY_STEPS, &saved_steps);
+    esp_err_t err_k = nvs_get_u8(handle, ROLETA_NVS_KEY_KNOWN, &saved_known);
+    nvs_close(handle);
+
+    if (err_s != ESP_OK || err_k != ESP_OK) {
+        *steps = 0;
+        *known = false;
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+
+    *steps = saved_steps;
+    *known = (saved_known != 0);
+    return ESP_OK;
+}
+
+static void position_save_to_nvs(uint32_t steps, bool known)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ROLETA_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open (zapis pozycji) failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    esp_err_t err_s = nvs_set_u32(handle, ROLETA_NVS_KEY_STEPS, steps);
+    esp_err_t err_k = nvs_set_u8(handle, ROLETA_NVS_KEY_KNOWN, known ? 1 : 0);
+
+    if (err_s == ESP_OK && err_k == ESP_OK) {
+        err = nvs_commit(handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "nvs_commit (pozycja) failed: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "nvs_set (pozycja) failed: steps=%s known=%s",
+                 esp_err_to_name(err_s), esp_err_to_name(err_k));
+    }
+
+    nvs_close(handle);
+}
 
 /* -------------------------------------------------------------------- */
 /*  Deep sleep                                                          */
@@ -211,6 +277,11 @@ static void execute_motor_cmd(const motor_cmd_t *cmd)
     motor_driver_power_off();
 
     update_lift_percentage_attr(steps_to_percent(s_position_steps));
+
+    /* Trwaly zapis pozycji do NVS po kazdym zakonczonym (lub przerwanym
+     * przez STOP) ruchu - dzieki temu pozycja przetrwa reset/brownout/
+     * odlaczenie baterii, a nie tylko deep sleep. */
+    position_save_to_nvs(s_position_steps, s_position_known);
 
     s_motion_active = false;
 }
@@ -441,6 +512,21 @@ void app_main(void)
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(nvs_flash_init_partition(ESP_ZIGBEE_STORAGE_PARTITION_NAME));
+
+    /* Wczytaj ostatnia znana pozycje rolety z flasha (NVS). Odczyt
+     * wykonujemy raz, przy kazdym starcie/wybudzeniu - w przeciwienstwie
+     * do zapisu odczyt nie zuzywa flasha, wiec robimy to bezwarunkowo
+     * zamiast polegac na RTC_DATA_ATTR (ktore ginie przy pelnym resecie
+     * / utracie zasilania). */
+    esp_err_t pos_err = position_load_from_nvs(&s_position_steps, &s_position_known);
+    if (pos_err == ESP_OK) {
+        ESP_LOGI(TAG, "Wczytano pozycje z NVS: %lu krokow (known=%d)",
+                 (unsigned long)s_position_steps, s_position_known);
+    } else {
+        ESP_LOGW(TAG, "Brak zapisanej pozycji w NVS (%s) - wymagane zerowanie na krancowce",
+                 esp_err_to_name(pos_err));
+    }
+
     ESP_ERROR_CHECK(esp_deep_sleep_weakup_config());
 
     ESP_LOGI(TAG, "Start ESP Zigbee Stack (Roleta / Window Covering)");

@@ -28,6 +28,11 @@
 
 static const char *TAG = "ROLETA_END_DEVICE";
 
+/* Własny (manufacturer-specific) identyfikator komendy kalibracji.
+ * Wysyłany przez Zigbee2MQTT jako cluster-specific command 0xE0 na
+ * klastrze Window Covering. */
+#define ZCL_CMD_ROLETA_CALIBRATE 0xE0
+
 #define DEEP_SLEEP_TIME_SLEEP_SEC  30 /* jak dlugo spimy miedzy odpytaniami */
 #define DEEP_SLEEP_TIME_WAKEUP_SEC 1  /* fallback: ile czekamy na komende zanim usniemy, gdy nic nie przyjdzie */
 
@@ -57,6 +62,7 @@ static volatile bool s_motion_active  = false;
 
 typedef enum {
     MOTOR_CMD_GOTO_PERCENT,
+    MOTOR_CMD_CALIBRATE,
 } motor_cmd_type_t;
 
 typedef struct {
@@ -143,7 +149,7 @@ static void enter_deep_sleep_now(void)
      * cala reszta logiki (timery, kolejkowanie, flagi) dziala normalnie,
      * po prostu nie usypiamy faktycznie urzadzenia. Odkomentuj przed
      * wersja produkcyjna. */
-    esp_deep_sleep_start();
+    //esp_deep_sleep_start();
     ESP_LOGW(TAG, "[TEST MODE] esp_deep_sleep_start() pominiete - urzadzenie NIE usnie");
 }
 
@@ -243,12 +249,31 @@ static void home_to_top_limit(void)
     ESP_LOGI(TAG, "Homing done after %lu steps", (unsigned long)steps_done);
 }
 
+static void calibrate_to_top_limit(void)
+{
+    ESP_LOGI(TAG, "Calibration: moving to top limit switch...");
+    uint32_t steps_done = 0;
+    motor_driver_move(MOTOR_DIR_UP, ROLETA_HOMING_MAX_STEPS, true, &s_stop_requested, &steps_done);
+    s_position_steps = 0;
+    s_position_known = true;
+    ESP_LOGI(TAG, "Calibration done after %lu steps", (unsigned long)steps_done);
+}
+
 static void execute_motor_cmd(const motor_cmd_t *cmd)
 {
     s_motion_active   = true;
     s_stop_requested  = false;
 
     motor_driver_power_on();
+
+    if (cmd->type == MOTOR_CMD_CALIBRATE) {
+        calibrate_to_top_limit();
+        motor_driver_power_off();
+        update_lift_percentage_attr(steps_to_percent(s_position_steps));
+        position_save_to_nvs(s_position_steps, s_position_known);
+        s_motion_active = false;
+        return;
+    }
 
     if (!s_position_known) {
         home_to_top_limit();
@@ -424,6 +449,10 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
             cmd.type    = MOTOR_CMD_GOTO_PERCENT;
             cmd.percent = msg->in.payload.lift_percentage;
             queued      = true;
+            break;
+        case ZCL_CMD_ROLETA_CALIBRATE:
+            cmd.type = MOTOR_CMD_CALIBRATE;
+            queued   = true;
             break;
         default:
             msg->out.result = EZB_ZCL_STATUS_UNSUP_CMD;

@@ -57,6 +57,7 @@ static volatile bool s_motion_active  = false;
 
 typedef enum {
     MOTOR_CMD_GOTO_PERCENT,
+    MOTOR_CMD_CALIBRATE,
 } motor_cmd_type_t;
 
 typedef struct {
@@ -243,6 +244,16 @@ static void home_to_top_limit(void)
     ESP_LOGI(TAG, "Homing done after %lu steps", (unsigned long)steps_done);
 }
 
+static void calibrate_to_top_limit(void)
+{
+    ESP_LOGI(TAG, "Calibration: moving to top limit switch...");
+    uint32_t steps_done = 0;
+    motor_driver_move(MOTOR_DIR_UP, ROLETA_HOMING_MAX_STEPS, true, &s_stop_requested, &steps_done);
+    s_position_steps = 0;
+    s_position_known = true;
+    ESP_LOGI(TAG, "Calibration done after %lu steps", (unsigned long)steps_done);
+}
+
 static void execute_motor_cmd(const motor_cmd_t *cmd)
 {
     s_motion_active   = true;
@@ -250,12 +261,31 @@ static void execute_motor_cmd(const motor_cmd_t *cmd)
 
     motor_driver_power_on();
 
+    if (cmd->type == MOTOR_CMD_CALIBRATE) {
+        uint32_t steps_before_cal = s_position_steps;
+        bool     known_before_cal = s_position_known;
+        calibrate_to_top_limit();
+        motor_driver_power_off();
+        update_lift_percentage_attr(steps_to_percent(s_position_steps));
+        if (s_position_steps != steps_before_cal || s_position_known != known_before_cal) {
+            ESP_LOGI(TAG, "Zapis pozycji do NVS po kalibracji: %lu krokow, known=%d",
+                     (unsigned long)s_position_steps, s_position_known);
+            position_save_to_nvs(s_position_steps, s_position_known);
+        } else {
+            ESP_LOGI(TAG, "Kalibracja bez zmian stanu, pomijam zapis NVS");
+        }
+        s_motion_active = false;
+        return;
+    }
+
     if (!s_position_known) {
         home_to_top_limit();
     }
 
     uint8_t pct = cmd->percent > 100 ? 100 : cmd->percent;
     uint32_t target_steps = ((uint32_t)pct * ROLETA_TOTAL_STEPS) / 100u;
+
+    uint32_t steps_before = s_position_steps;
 
     if (target_steps != s_position_steps && !s_stop_requested) {
         uint32_t steps_done = 0;
@@ -278,10 +308,15 @@ static void execute_motor_cmd(const motor_cmd_t *cmd)
 
     update_lift_percentage_attr(steps_to_percent(s_position_steps));
 
-    /* Trwaly zapis pozycji do NVS po kazdym zakonczonym (lub przerwanym
-     * przez STOP) ruchu - dzieki temu pozycja przetrwa reset/brownout/
-     * odlaczenie baterii, a nie tylko deep sleep. */
-    position_save_to_nvs(s_position_steps, s_position_known);
+    /* Zapisz do NVS tylko gdy pozycja faktycznie się zmieniła - oszczędność
+     * cykli zapisu flash przy komendzie "jedź na aktualną pozycję". */
+    if (s_position_steps != steps_before) {
+        ESP_LOGI(TAG, "Zapis pozycji do NVS: %lu -> %lu krokow",
+                 (unsigned long)steps_before, (unsigned long)s_position_steps);
+        position_save_to_nvs(s_position_steps, s_position_known);
+    } else {
+        ESP_LOGI(TAG, "Pozycja bez zmian (%lu krokow), pomijam zapis NVS", (unsigned long)s_position_steps);
+    }
 
     s_motion_active = false;
 }
@@ -407,9 +442,10 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
 
         switch (cmd_id) {
         case EZB_ZCL_CMD_WINDOW_COVERING_UP_OPEN_ID:
-            cmd.type    = MOTOR_CMD_GOTO_PERCENT;
-            cmd.percent = 0; // Otwarta w 0% (standard ZCL)
-            queued      = true;
+            /* UP/OPEN = kalibracja: fizyczny ruch do krańcówki + wyzerowanie pozycji.
+             * Przejście do 0% bez homingu realizuje goToLiftPercentage(0). */
+            cmd.type = MOTOR_CMD_CALIBRATE;
+            queued   = true;
             break;
         case EZB_ZCL_CMD_WINDOW_COVERING_DOWN_CLOSE_ID:
             cmd.type    = MOTOR_CMD_GOTO_PERCENT;

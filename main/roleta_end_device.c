@@ -329,12 +329,12 @@ static void motor_task(void *arg)
         if (xQueueReceive(s_motor_cmd_queue, &cmd, portMAX_DELAY) == pdTRUE) {
             execute_motor_cmd(&cmd);
 
-            /* Jeśli nie ma więcej komend w kolejce, nie usypiaj od razu.
-             * Daj radiu Zigbee 2 sekundy na wysłanie raportu o nowej pozycji. */
+            /* Po zakonczeniu ruchu sprawdz czy w miedzyczasie nie nadeszla
+             * kolejna komenda (nadpisana przez xQueueOverwrite). Jesli tak,
+             * od razu ja wykonaj - timer deep sleep uruchom dopiero gdy
+             * kolejka jest pusta i naprawde nie ma nic do zrobienia. */
             if (uxQueueMessagesWaiting(s_motor_cmd_queue) == 0) {
                 ESP_LOGI(TAG, "Ruch zakonczony. Oczekiwanie 2s na wyslanie raportow Zigbee...");
-                
-                /* Zatrzymujemy timer, jesli chodzil, i ustawiamy na 2 sekundy */
                 esp_timer_stop(s_oneshot_timer);
                 esp_timer_start_once(s_oneshot_timer, 2 * 1000000);
             }
@@ -353,7 +353,9 @@ static esp_err_t deferred_driver_init(void)
 
     ESP_RETURN_ON_ERROR(motor_driver_init(), TAG, "Failed to init motor driver");
 
-    s_motor_cmd_queue = xQueueCreate(4, sizeof(motor_cmd_t));
+    /* Rozmiar 1 - zawsze trzymamy tylko ostatnia komende. xQueueOverwrite
+     * po stronie producenta gwarantuje ze starsze komendy sa nadpisywane. */
+    s_motor_cmd_queue = xQueueCreate(1, sizeof(motor_cmd_t));
     ESP_RETURN_ON_FALSE(s_motor_cmd_queue != NULL, ESP_FAIL, TAG, "Failed to create motor cmd queue");
 
     xTaskCreate(motor_task, "motor_task", 4096, NULL, 5, NULL);
@@ -467,13 +469,11 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
         }
 
         if (queued) {
-            s_stop_requested = false;
-            if (xQueueSend(s_motor_cmd_queue, &cmd, 0) == pdTRUE) {
-                msg->out.result = EZB_ZCL_STATUS_SUCCESS;
-            } else {
-                ESP_LOGW(TAG, "Motor command queue full, dropping command");
-                msg->out.result = EZB_ZCL_STATUS_FAIL;
-            }
+            /* Przerwij trwajacy ruch - motor_task pobierze nowa komende
+             * zaraz po tym jak execute_motor_cmd wykryje flage i wyjdzie. */
+            s_stop_requested = true;
+            xQueueOverwrite(s_motor_cmd_queue, &cmd);
+            msg->out.result = EZB_ZCL_STATUS_SUCCESS;
         }
     } break;
     case EZB_ZCL_CORE_DEFAULT_RSP_CB_ID: {
